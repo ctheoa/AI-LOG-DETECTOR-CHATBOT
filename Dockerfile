@@ -16,21 +16,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Build the ChromaDB collection from scratch at image build time.
-# This guarantees the schema is always compatible with the installed
-# ChromaDB version — no more "no such column" errors after upgrades.
-# The OPENAI_API_KEY must be passed at build time:
-#   docker compose build --build-arg OPENAI_API_KEY=sk-...
-ARG OPENAI_API_KEY
-ENV OPENAI_API_KEY=${OPENAI_API_KEY}
-ENV CHROMA_PATH=/app/chroma_db_v2
-ENV ANONYMIZED_TELEMETRY=false
-ENV CHROMA_TELEMETRY=false
-
-RUN python build_chroma.py
+# Remove old tar.gz if it still exists in the build context
+RUN rm -f chroma_db_v2.tar.gz
 
 RUN mkdir -p /data_to_monitor /app/chat_history
 
+ENV ANONYMIZED_TELEMETRY=false
+ENV CHROMA_TELEMETRY=false
+ENV CHROMA_PATH=/app/chroma_db_v2
+
+# Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8501
 
-CMD ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# entrypoint.sh builds ChromaDB on first start (has access to runtime env vars)
+# then launches Streamlit
+CMD ["/app/entrypoint.sh"]
