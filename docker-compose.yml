@@ -1,22 +1,16 @@
-version: "3.9"
-
 services:
-
-  soc_ai:
-
+  logguard:
     build: .
-
-    container_name: soc_ai_app
-
     ports:
       - "8501:8501"
-
-    env_file:
-      - .env
-
     volumes:
-      - ./data_to_monitor:/data_to_monitor
-      - ./storage:/app/storage
-      - ./chroma_db_v2:/app/chroma_db_v2
-
+      - /var/log:/data_to_monitor:ro
+      - logguard_data:/app/chat_history
     restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANONYMIZED_TELEMETRY=false
+      - CHROMA_TELEMETRY=false
+
+volumes:
+  logguard_data:
