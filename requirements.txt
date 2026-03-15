@@ -1,7 +1,8 @@
 streamlit>=1.33.0
 openai
 matplotlib
-chromadb==0.5.23
+chromadb==0.5.5
 numpy<2.0
 python-dotenv
 tqdm
+ 
