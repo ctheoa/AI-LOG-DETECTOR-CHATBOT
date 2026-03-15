@@ -1,3 +1,15 @@
+# API keys - NEVER commit this
 .env
+
+# Python cache
 __pycache__/
 *.pyc
+*.pyo
+
+# Detection output files (generated at runtime, not needed in repo)
+detection_results.json
+detection_offset.json
+master_log.txt
+
+# Logs
+*.log
