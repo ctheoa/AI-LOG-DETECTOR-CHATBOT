@@ -1,0 +1,9 @@
+services:
+  logguard:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      - /var/log:/data_to_monitor:ro
+    restart: unless-stopped
+    privileged: true
