@@ -7,6 +7,8 @@ services:
       - /var/log:/data_to_monitor:ro
       - logguard_data:/app/chat_history
     restart: unless-stopped
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
 
 volumes:
   logguard_data:
