@@ -16,13 +16,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN tar -xzf chroma_db_v2.tar.gz && rm chroma_db_v2.tar.gz
-RUN echo "=== ChromaDB contents ===" && ls -la /app/chroma_db_v2/
-
-RUN mkdir -p /data_to_monitor /app/chat_history
-
+# Build the ChromaDB collection from scratch at image build time.
+# This guarantees the schema is always compatible with the installed
+# ChromaDB version — no more "no such column" errors after upgrades.
+# The OPENAI_API_KEY must be passed at build time:
+#   docker compose build --build-arg OPENAI_API_KEY=sk-...
+ARG OPENAI_API_KEY
+ENV OPENAI_API_KEY=${OPENAI_API_KEY}
+ENV CHROMA_PATH=/app/chroma_db_v2
 ENV ANONYMIZED_TELEMETRY=false
 ENV CHROMA_TELEMETRY=false
+
+RUN python build_chroma.py
+
+RUN mkdir -p /data_to_monitor /app/chat_history
 
 EXPOSE 8501
 
