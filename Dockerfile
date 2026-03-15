@@ -4,9 +4,6 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
     build-essential \
-    iptables \
-    iproute2 \
-    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
