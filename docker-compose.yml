@@ -9,6 +9,8 @@ services:
     restart: unless-stopped
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANONYMIZED_TELEMETRY=false
+      - CHROMA_TELEMETRY=false
 
 volumes:
   logguard_data:
