@@ -47,7 +47,7 @@ if os.path.exists(WATCH_DIR):
     files.sort()
 
 # ── HELPERS ────────────────────────────────────────────────────────────────────
-def read_last_n_lines(filepath: str, n: int = 200) -> list[str]:
+def read_last_n_lines(filepath: str, n: int = 200) -> list:
     try:
         with open(filepath, "rb") as f:
             f.seek(0, 2)
@@ -83,7 +83,7 @@ def load_all_sessions() -> dict:
     return sessions
 
 
-def load_detection_results() -> dict | None:
+def load_detection_results() -> dict:
     if os.path.exists(RESULTS_FILE):
         try:
             with open(RESULTS_FILE, encoding="utf-8") as f:
@@ -163,9 +163,9 @@ def save_flags(data: dict):
         json.dump(data, f, indent=2)
 
 
-def extract_ips_from_logs(selected: list[str], n: int = 1000) -> dict[str, int]:
+def extract_ips_from_logs(selected: list, n: int = 1000) -> dict:
     ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-    counts: dict[str, int] = {}
+    counts = {}
     for rel in selected:
         for line in read_last_n_lines(os.path.join(WATCH_DIR, rel), n):
             for ip in ip_pattern.findall(line):
@@ -576,7 +576,7 @@ with tab_dashboard:
         st.divider()
 
         total_lines    = 0
-        ip_counts: dict[str, int] = {}
+        ip_counts = {}
         keyword_counts = {
             "Failed password": 0,
             "Accepted":        0,
