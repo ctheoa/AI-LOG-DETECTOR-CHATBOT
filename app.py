@@ -2,6 +2,8 @@ import streamlit as st
 import os
 import time
 import json
+import re
+import subprocess
 from datetime import datetime
 from openai import OpenAI
 
@@ -9,6 +11,7 @@ from openai import OpenAI
 WATCH_DIR        = "/data_to_monitor"
 MASTER_FILE_PATH = "/app/master_log.txt"
 HISTORY_DIR      = "/app/chat_history"
+FLAGS_FILE       = "/app/flagged_ips.json"
 os.makedirs(HISTORY_DIR, exist_ok=True)
 
 st.set_page_config(page_title="AI Log Security Analyst",
@@ -16,12 +19,12 @@ st.set_page_config(page_title="AI Log Security Analyst",
 
 # ── SESSION STATE ──────────────────────────────────────────────────────────────
 for k, v in {
-    "logging_active":   False,
-    "messages":         [],
-    "multiselect_key":  0,
-    "ai_error":         None,
-    "last_pos":         {},
-    "session_name":     datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
+    "logging_active":  False,
+    "messages":        [],
+    "multiselect_key": 0,
+    "ai_error":        None,
+    "last_pos":        {},
+    "session_name":    datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
 }.items():
     if k not in st.session_state:
         st.session_state[k] = v
@@ -37,7 +40,6 @@ if os.path.exists(WATCH_DIR):
 
 # ── HELPERS ────────────────────────────────────────────────────────────────────
 def read_last_n_lines(filepath: str, n: int = 200) -> list[str]:
-    """Read last N lines without loading the whole file."""
     try:
         with open(filepath, "rb") as f:
             f.seek(0, 2)
@@ -74,13 +76,10 @@ def load_all_sessions() -> dict:
 
 
 def generate_pdf(messages: list, session_name: str) -> bytes:
-    """Generate a simple PDF from chat messages using only stdlib + bytes."""
-    # Pure-Python minimal PDF builder — no external library needed
     lines = [f"LogGuard AI — Chat Export", f"Session: {session_name}", ""]
     for m in messages:
         role = "You" if m["role"] == "user" else "AI Analyst"
         lines.append(f"[{role}]")
-        # Word-wrap at ~90 chars
         for paragraph in m["content"].split("\n"):
             while len(paragraph) > 90:
                 lines.append(paragraph[:90])
@@ -88,26 +87,22 @@ def generate_pdf(messages: list, session_name: str) -> bytes:
             lines.append(paragraph)
         lines.append("")
 
-    # Build PDF manually
-    def pdf_str(s): return s.encode("latin-1", errors="replace")
+    objects_body = b""
+    offsets = []
 
-    objects = []
-    def add_obj(content: str) -> int:
-        objects.append(content.encode())
-        return len(objects)
+    def write_obj(oid: int, content: str):
+        nonlocal objects_body
+        offsets.append(len(b"%PDF-1.4\n") + len(objects_body))
+        objects_body += f"{oid} 0 obj\n{content}\nendobj\n".encode()
 
-    catalog_id = 1
-    pages_id   = 2
-    font_id    = 3
-    page_id    = 4
-    content_id = 5
-
-    # Content stream
     y = 780
-    stream_lines = ["BT", "/F1 10 Tf", "10 12 Td"]
+    stream_lines = ["BT", "/F1 10 Tf", "50 780 Td"]
     for line in lines:
-        safe = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        safe = safe.encode("latin-1", errors="replace").decode("latin-1")
+        safe = (line.replace("\\", "\\\\")
+                    .replace("(", "\\(")
+                    .replace(")", "\\)")
+                    .encode("latin-1", errors="replace")
+                    .decode("latin-1"))
         stream_lines.append(f"({safe}) Tj")
         y -= 14
         if y < 50:
@@ -117,34 +112,105 @@ def generate_pdf(messages: list, session_name: str) -> bytes:
             stream_lines.append("0 -14 Td")
     stream_lines.append("ET")
     stream = "\n".join(stream_lines)
-
-    offsets = []
-    body = b""
-
-    def write_obj(oid: int, content: str):
-        nonlocal body
-        offsets.append(len(body) + 9)  # 9 = len("%PDF-1.4\n")
-        body += f"{oid} 0 obj\n{content}\nendobj\n".encode()
+    stream_bytes = stream.encode("latin-1", errors="replace")
 
     write_obj(1, "<< /Type /Catalog /Pages 2 0 R >>")
     write_obj(2, "<< /Type /Pages /Kids [4 0 R] /Count 1 >>")
     write_obj(3, "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
-    write_obj(4, "<< /Type /Page /Parent 2 0 R "
-                 "/MediaBox [0 0 612 842] "
-                 "/Contents 5 0 R "
-                 "/Resources << /Font << /F1 3 0 R >> >> >>")
-    stream_bytes = stream.encode("latin-1", errors="replace")
-    write_obj(5, f"<< /Length {len(stream_bytes)} >>\nstream\n"
-                 + stream_bytes.decode("latin-1") + "\nendstream")
+    write_obj(4, ("<< /Type /Page /Parent 2 0 R "
+                  "/MediaBox [0 0 612 842] /Contents 5 0 R "
+                  "/Resources << /Font << /F1 3 0 R >> >> >>"))
+    write_obj(5, (f"<< /Length {len(stream_bytes)} >>\nstream\n"
+                  + stream_bytes.decode("latin-1") + "\nendstream"))
 
-    xref_offset = len(b"%PDF-1.4\n") + len(body)
-    xref = f"xref\n0 6\n0000000000 65535 f \n"
+    xref_offset = len(b"%PDF-1.4\n") + len(objects_body)
+    xref = "xref\n0 6\n0000000000 65535 f \n"
     for off in offsets:
         xref += f"{off:010d} 00000 n \n"
     trailer = (f"trailer\n<< /Size 6 /Root 1 0 R >>\n"
                f"startxref\n{xref_offset}\n%%EOF")
+    return b"%PDF-1.4\n" + objects_body + xref.encode() + trailer.encode()
 
-    return b"%PDF-1.4\n" + body + xref.encode() + trailer.encode()
+
+# ── IP / PORT CONTROL (iptables) ───────────────────────────────────────────────
+def load_flags() -> dict:
+    """{ ip: { "flagged": bool, "blocked": bool, "note": str } }"""
+    if os.path.exists(FLAGS_FILE):
+        try:
+            with open(FLAGS_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def save_flags(data: dict):
+    with open(FLAGS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def run_iptables(args: list[str]) -> tuple[bool, str]:
+    """Run an iptables command. Returns (success, message)."""
+    try:
+        result = subprocess.run(
+            ["iptables"] + args,
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            return True, result.stdout.strip()
+        return False, result.stderr.strip()
+    except FileNotFoundError:
+        return False, "iptables not found — is the container running with privileged: true?"
+    except Exception as e:
+        return False, str(e)
+
+
+def block_ip(ip: str) -> tuple[bool, str]:
+    ok, msg = run_iptables(["-I", "INPUT", "1", "-s", ip, "-j", "DROP"])
+    if ok:
+        run_iptables(["-I", "OUTPUT", "1", "-d", ip, "-j", "DROP"])
+    return ok, msg
+
+
+def unblock_ip(ip: str) -> tuple[bool, str]:
+    run_iptables(["-D", "INPUT", "-s", ip, "-j", "DROP"])
+    ok, msg = run_iptables(["-D", "OUTPUT", "-d", ip, "-j", "DROP"])
+    return True, "Unblocked"
+
+
+def block_port(port: int, proto: str = "tcp") -> tuple[bool, str]:
+    return run_iptables(["-I", "INPUT", "1", "-p", proto,
+                         "--dport", str(port), "-j", "DROP"])
+
+
+def unblock_port(port: int, proto: str = "tcp") -> tuple[bool, str]:
+    run_iptables(["-D", "INPUT", "-p", proto, "--dport", str(port), "-j", "DROP"])
+    return True, "Port unblocked"
+
+
+def get_blocked_ips() -> list[str]:
+    """Read currently blocked IPs from iptables INPUT chain."""
+    ok, out = run_iptables(["-L", "INPUT", "-n", "--line-numbers"])
+    if not ok:
+        return []
+    ips = []
+    for line in out.splitlines():
+        if "DROP" in line:
+            m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", line)
+            if m:
+                ips.append(m.group(1))
+    return list(set(ips))
+
+
+def extract_ips_from_logs(selected: list[str], n: int = 1000) -> dict[str, int]:
+    """Return { ip: count } from the last N lines of selected log files."""
+    ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+    counts: dict[str, int] = {}
+    for rel in selected:
+        for line in read_last_n_lines(os.path.join(WATCH_DIR, rel), n):
+            for ip in ip_pattern.findall(line):
+                counts[ip] = counts.get(ip, 0) + 1
+    return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
 
 # ── SIDEBAR ────────────────────────────────────────────────────────────────────
@@ -195,19 +261,47 @@ with st.sidebar:
 
 
 # ── TABS ───────────────────────────────────────────────────────────────────────
-tab_chat, tab_dashboard, tab_live, tab_history = st.tabs([
+tab_chat, tab_dashboard, tab_live, tab_history, tab_security = st.tabs([
     "🤖 AI Chatbot",
     "📊 Dashboard",
     "📡 Live Logs",
     "🕓 History",
+    "🔒 Security Controls",
 ])
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 1 — CHATBOT  (original logic, untouched)
+#  TAB 1 — CHATBOT
 # ══════════════════════════════════════════════════════════════════════════════
 with tab_chat:
     st.title("🤖 AI Security Analyst")
+
+    # ── Top action bar ─────────────────────────────────────────────────────────
+    tb1, tb2, tb3 = st.columns([1, 1, 5])
+    with tb1:
+        if st.button("🆕 New chat", use_container_width=True):
+            if st.session_state.messages:
+                save_history(st.session_state.session_name,
+                             st.session_state.messages)
+            st.session_state.messages    = []
+            st.session_state.session_name = datetime.now().strftime(
+                "%Y-%m-%d_%H-%M-%S")
+            st.session_state.ai_error    = None
+            st.rerun()
+    with tb2:
+        if st.session_state.messages:
+            pdf_bytes = generate_pdf(st.session_state.messages,
+                                     st.session_state.session_name)
+            st.download_button(
+                "📄 Export PDF",
+                data=pdf_bytes,
+                file_name=f"logguard_{st.session_state.session_name}.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
+
+    st.divider()
+
     can_chat = bool(api_key and selected_files and st.session_state.logging_active)
 
     for message in st.session_state.messages:
@@ -217,14 +311,12 @@ with tab_chat:
     if prompt := st.chat_input("Ask me about the logs…", disabled=not can_chat):
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.ai_error = None
-
         try:
             client = OpenAI(api_key=api_key)
             log_context = ""
             if os.path.exists(MASTER_FILE_PATH):
                 with open(MASTER_FILE_PATH, "r", encoding="utf-8") as f:
                     log_context = f.read()[-5000:]
-
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
@@ -237,33 +329,11 @@ with tab_chat:
             reply = response.choices[0].message.content
             st.session_state.messages.append(
                 {"role": "assistant", "content": reply})
-            # Auto-save history after every AI reply
             save_history(st.session_state.session_name,
                          st.session_state.messages)
         except Exception as e:
             st.session_state.ai_error = f"AI Error: {e}"
-
         st.rerun()
-
-    # ── Export to PDF ──────────────────────────────────────────────────────────
-    if st.session_state.messages:
-        st.divider()
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("🗑️ Clear chat"):
-                st.session_state.messages = []
-                st.rerun()
-        with col2:
-            pdf_bytes = generate_pdf(
-                st.session_state.messages,
-                st.session_state.session_name,
-            )
-            st.download_button(
-                label="📄 Export chat to PDF",
-                data=pdf_bytes,
-                file_name=f"logguard_{st.session_state.session_name}.pdf",
-                mime="application/pdf",
-            )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -275,11 +345,8 @@ with tab_dashboard:
     if not st.session_state.logging_active or not selected_files:
         st.info("Start monitoring from the sidebar to see the dashboard.")
     else:
-        import re
-
-        # Collect stats from all selected files
-        total_lines   = 0
-        ip_counts     = {}
+        total_lines    = 0
+        ip_counts: dict[str, int] = {}
         keyword_counts = {
             "Failed password": 0,
             "Accepted":        0,
@@ -289,36 +356,28 @@ with tab_dashboard:
             "UFW BLOCK":       0,
         }
         hourly_counts = {str(h).zfill(2): 0 for h in range(24)}
-        ip_pattern = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+        ip_pattern    = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
         for rel in selected_files:
             lines = read_last_n_lines(os.path.join(WATCH_DIR, rel), 2000)
             total_lines += len(lines)
             for line in lines:
-                # IPs
                 for ip in ip_pattern.findall(line):
                     ip_counts[ip] = ip_counts.get(ip, 0) + 1
-                # Keywords
                 for kw in keyword_counts:
                     if kw.lower() in line.lower():
                         keyword_counts[kw] += 1
-                # Hour extraction (common syslog format: "Jan 1 14:23:01")
                 m = re.search(r"\b(\d{2}):\d{2}:\d{2}\b", line)
-                if m:
-                    h = m.group(1)
-                    if h in hourly_counts:
-                        hourly_counts[h] += 1
+                if m and m.group(1) in hourly_counts:
+                    hourly_counts[m.group(1)] += 1
 
-        # ── Metric cards ───────────────────────────────────────────────────────
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("📄 Total lines analysed", f"{total_lines:,}")
-        c2.metric("🚫 Failed logins",    keyword_counts["Failed password"])
-        c3.metric("✅ Accepted logins",  keyword_counts["Accepted"])
-        c4.metric("🔥 Firewall blocks",  keyword_counts["UFW BLOCK"])
-
+        c1.metric("📄 Lines analysed",   f"{total_lines:,}")
+        c2.metric("🚫 Failed logins",     keyword_counts["Failed password"])
+        c3.metric("✅ Accepted logins",   keyword_counts["Accepted"])
+        c4.metric("🔥 Firewall blocks",   keyword_counts["UFW BLOCK"])
         st.divider()
 
-        # ── Keyword bar chart ──────────────────────────────────────────────────
         st.subheader("Keyword frequency")
         kw_data = {k: v for k, v in keyword_counts.items() if v > 0}
         if kw_data:
@@ -326,21 +385,19 @@ with tab_dashboard:
         else:
             st.caption("No keyword matches yet.")
 
-        # ── Hourly activity ────────────────────────────────────────────────────
         st.subheader("Activity by hour")
         if any(v > 0 for v in hourly_counts.values()):
             st.bar_chart(hourly_counts)
         else:
             st.caption("No timestamped entries found.")
 
-        # ── Top IPs ────────────────────────────────────────────────────────────
         st.subheader("Top 10 IPs")
         if ip_counts:
             top_ips = dict(sorted(ip_counts.items(),
                                   key=lambda x: x[1], reverse=True)[:10])
             st.bar_chart(top_ips)
         else:
-            st.caption("No IPs found in logs.")
+            st.caption("No IPs found.")
 
         if st.button("🔄 Refresh dashboard"):
             st.rerun()
@@ -357,37 +414,42 @@ with tab_live:
     else:
         now_str = datetime.now().strftime("%H:%M:%S")
 
-        # Pulsing live indicator
-        st.html(f"""
+        # ── Top bar: indicator + refresh controls ──────────────────────────────
+        top1, top2, top3 = st.columns([3, 1, 1])
+        with top1:
+            st.html(f"""
 <style>
 @keyframes pulse {{
-  0%,100% {{ opacity:1; transform:scale(1); }}
-  50%      {{ opacity:0.3; transform:scale(0.8); }}
+  0%,100%{{ opacity:1; transform:scale(1); }}
+  50%     {{ opacity:0.3; transform:scale(0.8); }}
 }}
 </style>
 <div style="display:flex;align-items:center;gap:10px;background:#0e1117;
-            border:1px solid #1a3a1a;border-radius:8px;
-            padding:8px 14px;margin-bottom:8px;">
+            border:1px solid #1a3a1a;border-radius:8px;padding:7px 14px;">
   <div style="width:10px;height:10px;border-radius:50%;background:#00e676;
               flex-shrink:0;animation:pulse 1.4s ease-in-out infinite;"></div>
   <span style="color:#00e676;font-size:13px;font-weight:600;
                font-family:monospace;">LIVE</span>
-  <span style="color:#555;font-size:12px;font-family:monospace;">
-    {now_str}
-  </span>
+  <span style="color:#555;font-size:12px;font-family:monospace;">{now_str}</span>
 </div>
 """)
+        with top2:
+            if st.button("🔄 Refresh", use_container_width=True, key="live_ref"):
+                st.rerun()
+        with top3:
+            auto = st.toggle("Auto 4s", key="live_auto",
+                             help="Turn off when using other tabs.")
 
         n_lines = st.slider("Lines per file", 50, 500, 150, step=50,
                             key="live_slider")
-        search  = st.text_input("Filter", placeholder="e.g. sshd, sudo, 192.168",
+        search  = st.text_input("Filter",
+                                placeholder="e.g. sshd, sudo, 192.168",
                                 label_visibility="collapsed")
 
         for rel in selected_files:
             lines = read_last_n_lines(os.path.join(WATCH_DIR, rel), n_lines)
             if search:
                 lines = [l for l in lines if search.lower() in l.lower()]
-
             with st.expander(f"📄 {rel}  ({len(lines)} lines)", expanded=True):
                 if not lines:
                     st.caption("No lines match your filter.")
@@ -407,14 +469,9 @@ with tab_live:
                         + rows + "</div>"
                     )
 
-        rc1, rc2 = st.columns([1, 1])
-        with rc1:
-            if st.button("🔄 Refresh now", key="live_refresh"):
-                st.rerun()
-        with rc2:
-            if st.toggle("Auto-refresh (4 s)", key="live_auto"):
-                time.sleep(4)
-                st.rerun()
+        if auto:
+            time.sleep(4)
+            st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -425,15 +482,14 @@ with tab_history:
 
     sessions = load_all_sessions()
     if not sessions:
-        st.info("No saved sessions yet. Chat history is saved automatically.")
+        st.info("No saved sessions yet. Conversations are saved automatically.")
     else:
         selected_session = st.selectbox(
-            "Select a session to view:",
-            options=list(sessions.keys()),
-        )
+            "Select a session:", options=list(sessions.keys()))
+
         if selected_session:
             msgs = sessions[selected_session]
-            st.caption(f"{len(msgs)} messages · session: {selected_session}")
+            st.caption(f"{len(msgs)} messages · {selected_session}")
             st.divider()
 
             for msg in msgs:
@@ -441,26 +497,173 @@ with tab_history:
                     st.markdown(msg["content"])
 
             st.divider()
-            # Export selected historical session to PDF
-            pdf_bytes = generate_pdf(msgs, selected_session)
-            st.download_button(
-                label="📄 Export this session to PDF",
-                data=pdf_bytes,
-                file_name=f"logguard_{selected_session}.pdf",
-                mime="application/pdf",
-                key="hist_pdf",
-            )
-
-            if st.button("🗑️ Delete this session", key="del_session"):
-                path = os.path.join(HISTORY_DIR, f"{selected_session}.json")
-                if os.path.exists(path):
-                    os.remove(path)
-                st.rerun()
+            hc1, hc2, hc3 = st.columns([1, 1, 4])
+            with hc1:
+                pdf_bytes = generate_pdf(msgs, selected_session)
+                st.download_button(
+                    "📄 Export PDF",
+                    data=pdf_bytes,
+                    file_name=f"logguard_{selected_session}.pdf",
+                    mime="application/pdf",
+                    key="hist_pdf",
+                    use_container_width=True,
+                )
+            with hc2:
+                if st.button("🗑️ Delete", key="del_session",
+                             use_container_width=True):
+                    path = os.path.join(HISTORY_DIR, f"{selected_session}.json")
+                    if os.path.exists(path):
+                        os.remove(path)
+                    st.rerun()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  FRAGMENT — log engine (original logic, untouched)
+#  TAB 5 — SECURITY CONTROLS
 # ══════════════════════════════════════════════════════════════════════════════
+with tab_security:
+    st.title("🔒 Security Controls")
+    flags = load_flags()
+
+    # ── Section 1: IPs from logs ───────────────────────────────────────────────
+    st.subheader("IPs detected in logs")
+
+    if not selected_files or not st.session_state.logging_active:
+        st.info("Start monitoring to detect IPs.")
+    else:
+        ip_counts = extract_ips_from_logs(selected_files, 1000)
+        blocked_now = get_blocked_ips()
+
+        if not ip_counts:
+            st.caption("No IPs found in current logs.")
+        else:
+            for ip, count in list(ip_counts.items())[:30]:
+                is_flagged = flags.get(ip, {}).get("flagged", False)
+                is_blocked = ip in blocked_now
+
+                col_ip, col_count, col_flag, col_block, col_note = st.columns(
+                    [2, 1, 1, 1, 3])
+
+                with col_ip:
+                    if is_blocked:
+                        st.markdown(f"🔴 `{ip}`")
+                    elif is_flagged:
+                        st.markdown(f"🚩 `{ip}`")
+                    else:
+                        st.markdown(f"`{ip}`")
+
+                with col_count:
+                    st.caption(f"{count} hits")
+
+                with col_flag:
+                    label = "Unflag" if is_flagged else "🚩 Flag"
+                    if st.button(label, key=f"flag_{ip}",
+                                 use_container_width=True):
+                        if ip not in flags:
+                            flags[ip] = {}
+                        flags[ip]["flagged"] = not is_flagged
+                        save_flags(flags)
+                        st.rerun()
+
+                with col_block:
+                    if is_blocked:
+                        if st.button("Unblock", key=f"unblock_{ip}",
+                                     use_container_width=True):
+                            ok, msg = unblock_ip(ip)
+                            if ip in flags:
+                                flags[ip]["blocked"] = False
+                                save_flags(flags)
+                            st.toast(msg)
+                            st.rerun()
+                    else:
+                        if st.button("🚫 Block", key=f"block_{ip}",
+                                     type="primary", use_container_width=True):
+                            ok, msg = block_ip(ip)
+                            if ip not in flags:
+                                flags[ip] = {}
+                            flags[ip]["blocked"] = ok
+                            save_flags(flags)
+                            st.toast(msg if ok else f"Failed: {msg}")
+                            st.rerun()
+
+                with col_note:
+                    note = st.text_input("Note", key=f"note_{ip}",
+                                         value=flags.get(ip, {}).get("note", ""),
+                                         placeholder="add a note…",
+                                         label_visibility="collapsed")
+                    if note != flags.get(ip, {}).get("note", ""):
+                        if ip not in flags:
+                            flags[ip] = {}
+                        flags[ip]["note"] = note
+                        save_flags(flags)
+
+    st.divider()
+
+    # ── Section 2: Block a port ────────────────────────────────────────────────
+    st.subheader("Block / Unblock a port")
+    pc1, pc2, pc3, pc4 = st.columns([2, 1, 1, 1])
+    with pc1:
+        port_input = st.number_input("Port number", min_value=1,
+                                     max_value=65535, value=22,
+                                     label_visibility="collapsed")
+    with pc2:
+        proto = st.selectbox("Protocol", ["tcp", "udp"],
+                             label_visibility="collapsed")
+    with pc3:
+        if st.button("🚫 Block port", use_container_width=True):
+            ok, msg = block_port(int(port_input), proto)
+            st.toast(f"Port {port_input}/{proto}: {msg if ok else 'Failed: ' + msg}")
+            st.rerun()
+    with pc4:
+        if st.button("✅ Unblock port", use_container_width=True):
+            ok, msg = unblock_port(int(port_input), proto)
+            st.toast(f"Port {port_input}/{proto}: {msg}")
+            st.rerun()
+
+    st.divider()
+
+    # ── Section 3: Currently blocked IPs ──────────────────────────────────────
+    st.subheader("Currently blocked IPs (iptables)")
+    blocked_now = get_blocked_ips()
+    if not blocked_now:
+        st.caption("No IPs currently blocked.")
+    else:
+        for ip in blocked_now:
+            bc1, bc2 = st.columns([3, 1])
+            with bc1:
+                note = flags.get(ip, {}).get("note", "")
+                st.markdown(f"🔴 `{ip}`" + (f" — {note}" if note else ""))
+            with bc2:
+                if st.button("Unblock", key=f"ub2_{ip}",
+                             use_container_width=True):
+                    unblock_ip(ip)
+                    if ip in flags:
+                        flags[ip]["blocked"] = False
+                        save_flags(flags)
+                    st.rerun()
+
+    st.divider()
+
+    # ── Section 4: Flagged IPs ─────────────────────────────────────────────────
+    st.subheader("Flagged IPs")
+    flagged = {ip: d for ip, d in flags.items() if d.get("flagged")}
+    if not flagged:
+        st.caption("No flagged IPs.")
+    else:
+        for ip, d in flagged.items():
+            fc1, fc2, fc3 = st.columns([2, 3, 1])
+            with fc1:
+                st.markdown(f"🚩 `{ip}`")
+            with fc2:
+                st.caption(d.get("note", ""))
+            with fc3:
+                if st.button("Remove flag", key=f"remflag_{ip}",
+                             use_container_width=True):
+                    flags[ip]["flagged"] = False
+                    save_flags(flags)
+                    st.rerun()
+
+
+# ── FRAGMENT — log engine (original, untouched) ────────────────────────────────
 @st.fragment(run_every="2s")
 def log_engine():
     if st.session_state.logging_active and selected_files:
@@ -477,8 +680,7 @@ def log_engine():
                         if new_data:
                             master.write(
                                 f"\n[SOURCE: {f_name} | "
-                                f"{time.strftime('%H:%M:%S')}]\n{new_data}"
-                            )
+                                f"{time.strftime('%H:%M:%S')}]\n{new_data}")
                             st.session_state.last_pos[f_name] = f.tell()
 
 log_engine()
