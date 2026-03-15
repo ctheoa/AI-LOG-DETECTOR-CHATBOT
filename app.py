@@ -424,20 +424,25 @@ with tab_soc:
             loading.html(LOADING_HTML)
             try:
                 # Βήμα 1: GOD_OF_DETECTION (incremental — μόνο νέα logs)
-                run_detection()
+                det_ok, det_out = run_detection()
 
-                # Βήμα 2: GOD_OF_CHAT.ask() → απάντηση
-                reply = ask_god_of_chat(
-                    prompt,
-                    st.session_state.soc_messages[:-1])
+                if not det_ok:
+                    loading.empty()
+                    st.error("Detection failed. Output:")
+                    st.code(det_out, language="text")
+                else:
+                    # Βήμα 2: GOD_OF_CHAT.ask() → απάντηση
+                    reply = ask_god_of_chat(
+                        prompt,
+                        st.session_state.soc_messages[:-1])
 
-                loading.empty()
-                st.markdown(reply)
-                st.session_state.soc_messages.append(
-                    {"role": "assistant", "content": reply})
-                save_history(
-                    "SOC_" + st.session_state.session_name,
-                    st.session_state.soc_messages)
+                    loading.empty()
+                    st.markdown(reply)
+                    st.session_state.soc_messages.append(
+                        {"role": "assistant", "content": reply})
+                    save_history(
+                        "SOC_" + st.session_state.session_name,
+                        st.session_state.soc_messages)
 
             except Exception as e:
                 loading.empty()
